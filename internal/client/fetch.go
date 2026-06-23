@@ -3,6 +3,9 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/mail"
@@ -28,6 +31,22 @@ var messageIDHeaderSection = &imap.BodySectionName{
 	Peek: true,
 }
 
+// fallbackHeaderSection fetches only the three headers used to build a
+// fallback sync key when Message-Id is absent. Requested via a separate
+// UID FETCH targeting only the subset of messages that lacked Message-Id,
+// so the common case (messages with Message-Id) incurs zero extra wire cost.
+var fallbackHeaderSection = &imap.BodySectionName{
+	BodyPartName: imap.BodyPartName{
+		Specifier: imap.HeaderSpecifier,
+		Fields:    []string{"From", "Date", "Subject"},
+	},
+	Peek: true,
+}
+
+// fallbackKeyPrefix makes fallback keys disjoint from real Message-Id strings,
+// which always contain "@" (RFC 5322) and never start with this prefix.
+const fallbackKeyPrefix = "fallback:"
+
 // fullBodyPeekSection requests the entire RFC822 body without flipping the
 // \Seen flag on the source. This matters: a sync tool must not mutate the
 // source mailbox state. The previous implementation used FetchRFC822 which
@@ -35,19 +54,19 @@ var messageIDHeaderSection = &imap.BodySectionName{
 // messages as read.
 var fullBodyPeekSection = &imap.BodySectionName{Peek: true}
 
-// FetchMessageMap returns Message-Id → UID for every message in folder, plus
+// FetchMessageMap returns sync-key → UID for every message in folder, plus
 // the sum of RFC822.SIZE across all messages.
 //
-// One pass over the folder yields all three pieces. Messages without a usable
-// Message-Id are counted and reported once via the progress writer — without
-// that header the diff has no key to match on, so they cannot be tracked
-// across servers and will be silently skipped. The folder-wide size total is
-// used by callers (sync preview) to estimate transfer volume; messages without
-// a Message-Id still contribute to the total because they exist on the wire.
+// One pass fetches Message-Id + UID + RFC822.SIZE for every message. Messages
+// with a Message-Id use that as their key. For messages without a Message-Id a
+// second targeted UID FETCH retrieves From/Date/Subject and the sync key
+// becomes SHA-256(From||0||Date||0||Subject||0||RFC822.SIZE) prefixed with
+// "fallback:". The second fetch only covers the missing-id subset, so the
+// common case incurs zero extra wire cost.
 //
-// The returned map is suitable both as the source side of a Message-Id diff
-// and (with UIDs ignored) as the destination side; callers that only need
-// the keys can use FetchMessageIDSet for a slightly thinner allocation.
+// If both Message-Id and all fallback headers are absent the fallback key
+// contains size only; two such messages in the same folder will collide and
+// only one will sync — this degenerate case is logged separately.
 func (c *Client) FetchMessageMap(ctx context.Context, folder string) (map[string]uint32, uint64, error) {
 	stop := c.withCancel(ctx)
 	defer stop()
@@ -59,14 +78,18 @@ func (c *Client) FetchMessageMap(ctx context.Context, folder string) (map[string
 	c.log("[%s] Fetching folder %s...", c.prefix, folder)
 
 	var (
-		ids          map[string]uint32
-		totalSize    uint64
-		missingCount int
+		ids                 map[string]uint32
+		totalSize           uint64
+		missingUIDs         []uint32
+		missingSize         map[uint32]uint64
+		fallbackCount       int
+		fallbackAllEmpty    int
 	)
 	err := c.safeCall(func(cli *imapclient.Client) error {
 		ids = nil
 		totalSize = 0
-		missingCount = 0
+		missingUIDs = missingUIDs[:0]
+		missingSize = nil
 		mbox, err := c.selectIfNeeded(cli, folder)
 		if err != nil {
 			return fmt.Errorf("[%s] cannot select folder %s: %w", c.prefix, folder, err)
@@ -108,7 +131,12 @@ func (c *Client) FetchMessageMap(ctx context.Context, folder string) (map[string
 			totalSize += uint64(msg.Size)
 			id := readMessageIDHeader(msg)
 			if id == "" {
-				missingCount++
+				// Defer to a second targeted fetch; size is already captured.
+				if missingSize == nil {
+					missingSize = make(map[uint32]uint64)
+				}
+				missingUIDs = append(missingUIDs, msg.Uid)
+				missingSize[msg.Uid] = uint64(msg.Size)
 				continue
 			}
 			ids[id] = msg.Uid
@@ -116,13 +144,29 @@ func (c *Client) FetchMessageMap(ctx context.Context, folder string) (map[string
 		if err := <-done; err != nil {
 			return fmt.Errorf("[%s] fetch IDs: %w", c.prefix, err)
 		}
+
+		if len(missingUIDs) > 0 {
+			slices.Sort(missingUIDs)
+			var ferr error
+			fallbackAllEmpty, ferr = c.fetchFallbackKeys(ctx, cli, missingUIDs, missingSize, ids)
+			if ferr != nil {
+				return ferr
+			}
+			fallbackCount = len(missingUIDs)
+		}
 		return nil
 	})
 
-	if err == nil && missingCount > 0 {
+	if err == nil {
 		if pw := c.progressWriter(); pw != nil {
-			pw.Log("[%s] ⚠️  %s: %d message(s) without Message-Id will be skipped — sync cannot track them",
-				c.prefix, folder, missingCount)
+			if fallbackCount > 0 {
+				pw.Log("[%s] %s: %d message(s) without Message-Id matched via fallback key (From/Date/Subject/size)",
+					c.prefix, folder, fallbackCount)
+			}
+			if fallbackAllEmpty > 0 {
+				pw.Log("[%s] ⚠️  %s: %d message(s) had no Message-Id, From, Date, or Subject — fallback key relies on size only and may collide",
+					c.prefix, folder, fallbackAllEmpty)
+			}
 		}
 	}
 	if err != nil {
@@ -150,6 +194,87 @@ func (c *Client) FetchMessageIDSet(ctx context.Context, folder string) (map[stri
 		out[id] = struct{}{}
 	}
 	return out, nil
+}
+
+// fetchFallbackKeys issues a second UID FETCH for From/Date/Subject on the
+// given UIDs (messages whose Message-Id was absent) and stores a derived sync
+// key into ids. sizes supplies the RFC822.SIZE already captured on the first
+// pass — including it in the hash distinguishes messages with identical visible
+// headers but different bodies (e.g. bulk notifications received the same
+// second). Batched at uidFetchBatchSize for the same reason as
+// StreamMessagesByUIDs. Returns the count of messages where all three header
+// fields were also empty (degenerate case: key hashes size only).
+func (c *Client) fetchFallbackKeys(ctx context.Context, cli *imapclient.Client, uids []uint32, sizes map[uint32]uint64, ids map[string]uint32) (allEmpty int, err error) {
+	for start := 0; start < len(uids); start += uidFetchBatchSize {
+		if err := ctx.Err(); err != nil {
+			return allEmpty, err
+		}
+		end := min(start+uidFetchBatchSize, len(uids))
+		batch := uids[start:end]
+
+		uidSet := new(imap.SeqSet)
+		for _, uid := range batch {
+			uidSet.AddNum(uid)
+		}
+		messages := make(chan *imap.Message, messageChanBuffer)
+		batchDone := make(chan error, 1)
+		items := []imap.FetchItem{fallbackHeaderSection.FetchItem(), imap.FetchUid}
+		go func() { batchDone <- cli.UidFetch(uidSet, items, messages) }()
+
+		for msg := range messages {
+			if ctx.Err() != nil {
+				continue
+			}
+			from, date, subject := readFallbackHeaders(msg)
+			if from == "" && date == "" && subject == "" {
+				allEmpty++
+			}
+			ids[fallbackSyncKey(from, date, subject, sizes[msg.Uid])] = msg.Uid
+		}
+		if ferr := <-batchDone; ferr != nil {
+			return allEmpty, fmt.Errorf("[%s] fetch fallback headers: %w", c.prefix, ferr)
+		}
+	}
+	return allEmpty, nil
+}
+
+// fallbackSyncKey hashes From, Date, Subject and RFC822.SIZE into a stable
+// string key prefixed with fallbackKeyPrefix. Null-byte separators prevent
+// cross-field collisions (e.g. from="A", subject="BC" vs from="AB", subject="C").
+func fallbackSyncKey(from, date, subject string, size uint64) string {
+	h := sha256.New()
+	h.Write([]byte(from))
+	h.Write([]byte{0})
+	h.Write([]byte(date))
+	h.Write([]byte{0})
+	h.Write([]byte(subject))
+	h.Write([]byte{0})
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], size)
+	h.Write(buf[:])
+	return fallbackKeyPrefix + hex.EncodeToString(h.Sum(nil))
+}
+
+// readFallbackHeaders extracts the raw From, Date, and Subject header values
+// from a message fetched with fallbackHeaderSection. Missing or unparseable
+// fields are returned as empty strings.
+func readFallbackHeaders(msg *imap.Message) (from, date, subject string) {
+	body := msg.GetBody(fallbackHeaderSection)
+	if body == nil {
+		return "", "", ""
+	}
+	raw, err := io.ReadAll(body)
+	if err != nil || len(raw) == 0 {
+		return "", "", ""
+	}
+	if !bytes.Contains(raw, []byte("\r\n\r\n")) && !bytes.Contains(raw, []byte("\n\n")) {
+		raw = append(raw, '\r', '\n', '\r', '\n')
+	}
+	m, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return "", "", ""
+	}
+	return m.Header.Get("From"), m.Header.Get("Date"), m.Header.Get("Subject")
 }
 
 // readMessageIDHeader extracts a normalized Message-Id from a fetched message.

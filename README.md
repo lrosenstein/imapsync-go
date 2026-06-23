@@ -198,10 +198,15 @@ mailboxes.
 between source and destination. This is fast and re-running a partial sync is
 safe, but it has two known limitations:
 
-- **Messages without a `Message-Id` are skipped.** Drafts, some bulk mail and
-  messages from broken senders may not have one. They cannot be tracked across
-  servers, so they are never copied. The CLI prints a warning per folder when
-  this happens so you know how many were skipped.
+- **Messages without a `Message-Id` use a fallback sync key.** Drafts, some
+  bulk mail, and messages from broken senders may not have one. For these,
+  `imapsync-go` derives a sync key from SHA-256(`From` + `Date` + `Subject` +
+  `RFC822.SIZE`). The key is stable across runs so idempotency is preserved.
+  The CLI logs how many messages in each folder used the fallback. If a message
+  has no `Message-Id` *and* no `From`, `Date`, or `Subject` headers, the key
+  hashes size only; two such messages with the same size in the same folder
+  would collide and only one would be synced — this is an extremely rare edge
+  case and is warned about separately.
 - **Servers that rewrite `Message-Id` on `APPEND` will cause duplicates on
   re-run.** A few IMAP servers (notably some Exchange configurations) replace
   the inbound `Message-Id` with their own value. The diff on the next run will

@@ -65,8 +65,9 @@ type Credentials struct {
 
 // DirectoryMapping holds source and destination folder names.
 type DirectoryMapping struct {
-	Source      string `json:"src" yaml:"src"` // Source folder name
-	Destination string `json:"dst" yaml:"dst"` // Destination folder name
+	Source      string `json:"src"         yaml:"src"`         // Source folder name
+	Destination string `json:"dst"         yaml:"dst"`         // Destination folder name
+	NoExpandSubfolders bool `json:"no_expand_subfolders" yaml:"no_expand_subfolders"` // Skip subfolder expansion for this mapping
 }
 
 // New loads configuration from the file specified in CLI context.

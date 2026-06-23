@@ -13,6 +13,7 @@ dst:
 map:
   - src: INBOX
     dst: INBOX
+    no_expand_subfolders: true
   - src: Sent
     dst: Sent
   - src: Archive.2023

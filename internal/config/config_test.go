@@ -310,6 +310,89 @@ rate_limit:
 	}
 }
 
+func TestNoExpandSubfoldersJSON(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		data    string
+		wantSet bool
+	}{
+		{
+			name:    "no_expand_subfolders true",
+			data:    `{"src":{"server":"s","user":"u","pass":"p"},"dst":{"server":"s","user":"u","pass":"p"},"map":[{"src":"INBOX","dst":"INBOX","no_expand_subfolders":true}]}`,
+			wantSet: true,
+		},
+		{
+			name:    "no_expand_subfolders omitted defaults false",
+			data:    `{"src":{"server":"s","user":"u","pass":"p"},"dst":{"server":"s","user":"u","pass":"p"},"map":[{"src":"INBOX","dst":"INBOX"}]}`,
+			wantSet: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var cfg Config
+			if err := json.Unmarshal([]byte(tt.data), &cfg); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if len(cfg.Map) != 1 {
+				t.Fatalf("Map len = %d, want 1", len(cfg.Map))
+			}
+			if cfg.Map[0].NoExpandSubfolders != tt.wantSet {
+				t.Errorf("NoExpandSubfolders = %v, want %v", cfg.Map[0].NoExpandSubfolders, tt.wantSet)
+			}
+		})
+	}
+}
+
+func TestNoExpandSubfoldersYAML(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		data    string
+		wantSet bool
+	}{
+		{
+			name: "no_expand_subfolders true",
+			data: `
+src: {server: s, user: u, pass: p}
+dst: {server: s, user: u, pass: p}
+map:
+  - src: INBOX
+    dst: INBOX
+    no_expand_subfolders: true
+`,
+			wantSet: true,
+		},
+		{
+			name: "no_expand_subfolders omitted defaults false",
+			data: `
+src: {server: s, user: u, pass: p}
+dst: {server: s, user: u, pass: p}
+map:
+  - src: INBOX
+    dst: INBOX
+`,
+			wantSet: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var cfg Config
+			if err := yaml.Unmarshal([]byte(tt.data), &cfg); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if len(cfg.Map) != 1 {
+				t.Fatalf("Map len = %d, want 1", len(cfg.Map))
+			}
+			if cfg.Map[0].NoExpandSubfolders != tt.wantSet {
+				t.Errorf("NoExpandSubfolders = %v, want %v", cfg.Map[0].NoExpandSubfolders, tt.wantSet)
+			}
+		})
+	}
+}
+
 // Backwards compatibility: a config without a rate_limit block must parse
 // cleanly and leave the limits at zero (= unlimited).
 func TestRateLimitOmittedJSON(t *testing.T) {

@@ -745,6 +745,32 @@ func Test_expandMappingsWithSubfolders_verboseLogging(t *testing.T) {
 	}
 }
 
+// Test_expandMappingsWithSubfolders_noExpandSubfoldersSkipsChildren asserts that
+// a mapping with NoExpandSubfolders: true produces exactly one entry (the
+// mapping itself) even when the source folder has children.
+func Test_expandMappingsWithSubfolders_noExpandSubfoldersSkipsChildren(t *testing.T) {
+	t.Parallel()
+
+	srcSrv := newFakeServer(t)
+	srcSrv.addConnHandler(customListHandler(srcSrv, []string{"jira", "jira/DEVOPS", "jira/SCD"}))
+	srcC := newAppClient(t, srcSrv, "src")
+	delimiter := srcC.GetDelimiter()
+
+	mappings := []config.DirectoryMapping{
+		{Source: "jira", Destination: "jira", NoExpandSubfolders: true},
+	}
+	got, err := expandMappingsWithSubfolders(context.Background(), srcC, mappings, delimiter, delimiter, false, true)
+	if err != nil {
+		t.Fatalf("expandMappingsWithSubfolders: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("len=%d, want 1 (no children when NoExpandSubfolders=true), got %v", len(got), got)
+	}
+	if got[0].Source != "jira" {
+		t.Errorf("Source=%q, want %q", got[0].Source, "jira")
+	}
+}
+
 // Test_expandMappingsWithSubfolders_canceledContext asserts that a pre-canceled
 // context causes expandMappingsWithSubfolders to return an error immediately.
 func Test_expandMappingsWithSubfolders_canceledContext(t *testing.T) {

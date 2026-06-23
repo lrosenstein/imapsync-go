@@ -14,7 +14,8 @@
   "map": [
     {
       "src": "INBOX",
-      "dst": "INBOX"
+      "dst": "INBOX",
+      "no_expand_subfolders": true
     },
     {
       "src": "Sent",

@@ -707,6 +707,10 @@ func expandMappingsWithSubfolders(ctx context.Context, srcClient *client.Client,
 		// Add the original mapping
 		expanded = append(expanded, mapping)
 
+		if mapping.NoExpandSubfolders {
+			continue
+		}
+
 		// Get subfolders for this source folder
 		subfolders, err := getSubfolders(ctx, srcClient, mapping.Source, srcDelimiter)
 		if err != nil {

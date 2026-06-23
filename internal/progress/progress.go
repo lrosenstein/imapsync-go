@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/jedib0t/go-pretty/v6/progress"
@@ -14,9 +15,15 @@ import (
 )
 
 // Writer is a wrapper around progress.Writer with pre-configured settings.
+// Log calls are buffered and flushed only when Stop or StopAndClear is called,
+// so messages never interleave with the render goroutine's cursor-erase cycles.
 type Writer struct {
 	pw          progress.Writer
+	out         io.Writer
+	pending     []string
 	numTrackers int
+	mu          sync.Mutex
+	quiet       bool
 }
 
 // getTerminalWidth returns the current terminal width, defaulting to 120 if detection fails.
@@ -31,11 +38,11 @@ func getTerminalWidth() int {
 func NewWriter(numTrackers int, quiet bool) *Writer {
 	pw := progress.NewWriter()
 	pw.SetAutoStop(false)
+	var out io.Writer = os.Stdout
 	if quiet {
-		pw.SetOutputWriter(io.Discard)
-	} else {
-		pw.SetOutputWriter(os.Stdout)
+		out = io.Discard
 	}
+	pw.SetOutputWriter(out)
 
 	// Calculate optimal lengths based on terminal width.
 	//
@@ -109,11 +116,14 @@ func NewWriter(numTrackers int, quiet bool) *Writer {
 	pw.Style().Options.TimeInProgressPrecision = time.Millisecond
 	pw.Style().Options.TimeDonePrecision = time.Millisecond
 
-	return &Writer{pw: pw, numTrackers: numTrackers}
+	return &Writer{pw: pw, out: out, numTrackers: numTrackers, quiet: quiet}
 }
 
-// SetOutputWriter redirects rendered output to out.
-func (w *Writer) SetOutputWriter(out io.Writer) { w.pw.SetOutputWriter(out) }
+// SetOutputWriter redirects rendered output and buffered log output to out.
+func (w *Writer) SetOutputWriter(out io.Writer) {
+	w.pw.SetOutputWriter(out)
+	w.out = out
+}
 
 // WaitForRenderDone spins until the render goroutine finishes its final pass.
 func (w *Writer) WaitForRenderDone() {
@@ -127,9 +137,25 @@ func (w *Writer) AppendTracker(tracker *progress.Tracker) {
 	w.pw.AppendTracker(tracker)
 }
 
-// Log prints a message above the progress bars.
+// Log buffers a message for printing after the progress bars stop. Buffering
+// prevents the render goroutine's cursor-erase cycles from trampling messages
+// that are written while rendering is in progress.
 func (w *Writer) Log(msg string, args ...any) {
-	w.pw.Log(msg, args...)
+	formatted := fmt.Sprintf(msg, args...)
+	w.mu.Lock()
+	w.pending = append(w.pending, formatted)
+	w.mu.Unlock()
+}
+
+// flushPending prints buffered log messages to w.out and clears the buffer.
+func (w *Writer) flushPending() {
+	w.mu.Lock()
+	msgs := w.pending
+	w.pending = nil
+	w.mu.Unlock()
+	for _, m := range msgs {
+		fmt.Fprintln(w.out, m)
+	}
 }
 
 // Start begins rendering the progress bars in a goroutine.
@@ -137,21 +163,24 @@ func (w *Writer) Start() {
 	go w.pw.Render()
 }
 
-// Stop stops the progress writer without clearing.
+// Stop stops the progress writer without clearing, then flushes buffered
+// log messages.
 func (w *Writer) Stop() {
 	w.pw.Stop()
+	w.WaitForRenderDone()
+	w.flushPending()
 }
 
 // StopAndClear stops the progress writer and erases the rendered trackers
 // from the terminal. Line count is taken from the NewWriter argument so
 // callers never have to keep that number in sync by hand.
 func (w *Writer) StopAndClear() {
-	// Wait for final rendering
 	time.Sleep(300 * time.Millisecond)
-
-	// Stop the writer
 	w.pw.Stop()
-
+	// Wait for the render goroutine to fully exit before issuing cursor
+	// movements — an in-flight render pass would otherwise race with the
+	// escape sequences below and leave zombie lines on screen.
+	w.WaitForRenderDone()
 	// After Stop, the cursor sits on a blank line one below the last
 	// rendered tracker. Go up numTrackers times, erasing each tracker
 	// line as we pass, then return to column 0 of the topmost erased
@@ -160,6 +189,7 @@ func (w *Writer) StopAndClear() {
 		fmt.Print("\033[A\033[K")
 	}
 	fmt.Print("\r")
+	w.flushPending()
 }
 
 // NewTracker creates a new tracker with the given message and total.

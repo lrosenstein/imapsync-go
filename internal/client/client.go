@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/emersion/go-imap"
+	"github.com/emersion/go-imap-compress"
 	imapclient "github.com/emersion/go-imap/client"
 	"github.com/greeddj/imapsync-go/internal/ratelimit"
 	"golang.org/x/time/rate"
@@ -384,6 +386,16 @@ func (c *Client) connectAndLogin(ctx context.Context) error {
 		return err
 	}
 
+	// use COMPRESS extension if supported
+	if ok, err := cli.Support(compress.Capability + "=" + compress.Deflate); err != nil {
+		// fall through to continue without compression
+	} else if ok {
+		compressCli := compress.NewClient(cli)
+		if err := compressCli.Compress(compress.Deflate); err == nil &&
+			compressCli.IsCompress() {
+			fmt.Fprintf(os.Stderr, "COMPRESS enabled for %s\n", c.serverAddr)
+		}
+	}
 	return nil
 }
 

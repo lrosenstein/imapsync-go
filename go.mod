@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/emersion/go-imap v1.2.1
+	github.com/emersion/go-imap-compress v0.0.0-20201103190257-14809af1d1b9
 	github.com/jedib0t/go-pretty/v6 v6.7.10
 	github.com/urfave/cli/v3 v3.8.0
 	golang.org/x/sync v0.20.0
@@ -31,4 +32,9 @@ tool (
 	golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment
 	golang.org/x/vuln/cmd/govulncheck
 	honnef.co/go/tools/cmd/staticcheck
+)
+
+replace (
+	github.com/emersion/go-imap v1.2.1 => github.com/lrosenstein/go-imap v1.2.2-0.20260615021842-9d46d3a5ee70
+	github.com/emersion/go-imap-compress => github.com/lrosenstein/go-imap-compress v0.0.0-20260620015646-4867efdf1ca0
 )

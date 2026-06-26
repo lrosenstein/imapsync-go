@@ -113,8 +113,8 @@ func NewWriter(numTrackers int, quiet bool) *Writer {
 	pw.Style().Options.DoneString = text.Colors{text.FgGreen}.Sprint("✓ done")
 	pw.Style().Options.ErrorString = text.Colors{text.FgRed}.Sprint("✗ error")
 	pw.Style().Options.PercentFormat = "%5.2f%%"
-	pw.Style().Options.TimeInProgressPrecision = time.Millisecond
-	pw.Style().Options.TimeDonePrecision = time.Millisecond
+	pw.Style().Options.TimeInProgressPrecision = time.Second
+	pw.Style().Options.TimeDonePrecision = time.Second
 
 	return &Writer{pw: pw, out: out, numTrackers: numTrackers, quiet: quiet}
 }
